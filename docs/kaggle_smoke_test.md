@@ -89,10 +89,11 @@ The structured console report and JSON summaries should show:
   merger output and language layer-0 image positions.
 - Empirical cyclic-shift evidence: every merged `32×32` cell has a unique
   deterministic texture. One-cell horizontal and vertical cyclic shifts are
-  matched against CPU-detached post-merger features. Treat the ordering as
-  established only when both shift checks report 100% expected matches and
-  `empirically_validated: true`; otherwise the report is explicitly
-  `inconclusive` and Phase 0B must not be closed.
+  matched against CPU-detached patch-embedding features, before positional
+  features and vision-block contextualization can confound content matching.
+  Treat the ordering as established only when both shift checks report 100%
+  expected matches and `empirically_validated: true`; otherwise the report is
+  explicitly `inconclusive` and Phase 0B must not be closed.
 - DeepStack source/boundary evidence: deltas between a decoder layer output and
   the next decoder layer input at visual positions. This establishes whether
   the parent loop adds DeepStack features in between; layer 3 input should be

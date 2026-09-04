@@ -58,7 +58,10 @@ def write_summary(name: str, summary: dict[str, Any]) -> None:
 def git_commit() -> str | None:
     try:
         return subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], text=True, stderr=subprocess.DEVNULL
+            ["git", "rev-parse", "HEAD"],
+            cwd=Path(__file__).resolve().parent.parent,
+            text=True,
+            stderr=subprocess.DEVNULL,
         ).strip()
     except Exception:
         # An uploaded Kaggle directory may not retain .git. The caller can
@@ -222,10 +225,20 @@ def module_source_summary(module: torch.nn.Module) -> dict[str, Any]:
 
 def method_source_summary(instance: Any, method_name: str) -> dict[str, Any]:
     """Record the installed processor code relevant to the runtime result."""
-    try:
-        source = inspect.getsource(getattr(type(instance), method_name))
+    for cls in type(instance).mro():
+        method = cls.__dict__.get(method_name)
+        if method is None:
+            continue
+        try:
+            source = inspect.getsource(method)
+        except (OSError, TypeError):
+            continue
+        # Fast processors often override preprocess only to call super(). The
+        # first non-trivial implementation contains the actual reshape path.
+        if len(source) < 500 and "super().preprocess" in source:
+            continue
         return {
-            "class": type(instance).__name__,
+            "class": cls.__name__,
             "method": method_name,
             "source_available": True,
             "relevant_lines": [
@@ -234,8 +247,7 @@ def method_source_summary(instance: Any, method_name: str) -> dict[str, Any]:
             ][:80],
             "source_excerpt": source[:4000],
         }
-    except (AttributeError, OSError, TypeError):
-        return {"class": type(instance).__name__, "method": method_name, "source_available": False}
+    return {"class": type(instance).__name__, "method": method_name, "source_available": False}
 
 
 def geometry_report(inputs: dict[str, torch.Tensor], model, merger_capture: torch.Tensor) -> dict[str, Any]:
@@ -269,16 +281,17 @@ def shifted_feature_match(
     *,
     row_shift: int,
     col_shift: int,
+    units_per_merged_cell: int = 1,
 ) -> dict[str, Any]:
-    """Match each shifted feature to its original cell by cosine similarity."""
+    """Match shifted patch/merged-cell features to their original content."""
     base = torch.nn.functional.normalize(base_features.float(), dim=-1)
     shifted = torch.nn.functional.normalize(shifted_features.float(), dim=-1)
     matched_indices = (shifted @ base.T).argmax(dim=1).tolist()
-    expected_indices = [
-        ((row - row_shift) % merged_rows) * merged_cols + ((col - col_shift) % merged_cols)
-        for row in range(merged_rows)
-        for col in range(merged_cols)
-    ]
+    expected_indices = []
+    for merged_index in range(merged_rows * merged_cols):
+        row, col = divmod(merged_index, merged_cols)
+        expected_cell = ((row - row_shift) % merged_rows) * merged_cols + ((col - col_shift) % merged_cols)
+        expected_indices.extend(expected_cell * units_per_merged_cell + unit for unit in range(units_per_merged_cell))
     matches = [actual == expected for actual, expected in zip(matched_indices, expected_indices)]
     mismatches = [
         {"shifted_token": index, "expected_base_token": expected_indices[index], "matched_base_token": matched_indices[index]}
@@ -286,7 +299,8 @@ def shifted_feature_match(
     ][:12]
     return {
         "shift_cells": {"row": row_shift, "col": col_shift},
-        "matching_method": "argmax cosine similarity between CPU-detached post-merger visual features",
+        "units_per_merged_cell": units_per_merged_cell,
+        "matching_method": "argmax cosine similarity between CPU-detached patch-embedding features before positional encoding",
         "matched_tokens": int(sum(matches)),
         "total_tokens": len(matches),
         "accuracy": float(sum(matches) / len(matches)),
@@ -421,34 +435,49 @@ def validate_qwen(device: torch.device) -> dict[str, Any]:
         "interpretation": "A non-zero visual delta from decoder output N to layer N+1 input demonstrates a parent-level addition between those hooks. Layer 3 input therefore follows all three early additions.",
     }
 
-    def visual_features(diagnostic_image: Image.Image) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
+    def visual_features(diagnostic_image: Image.Image) -> tuple[dict[str, torch.Tensor], torch.Tensor, torch.Tensor]:
         diagnostic_inputs = qwen_inputs(processor, diagnostic_image, device)
         with torch.inference_mode():
             model(**diagnostic_inputs, output_attentions=False, output_hidden_states=False, return_dict=True)
-        return diagnostic_inputs, hooks.captures["visual.merger"].clone()
+        return (
+            diagnostic_inputs,
+            hooks.captures["visual.patch_embed"].clone(),
+            hooks.captures["visual.merger"].clone(),
+        )
 
     def ordering_validation(merged_rows: int, merged_cols: int) -> dict[str, Any]:
         base_image = make_spatial_diagnostic_image(merged_rows, merged_cols)
-        base_inputs, base_features = visual_features(base_image)
-        right_inputs, right_features = visual_features(cyclic_cell_shift(base_image, col_cells=1))
-        down_inputs, down_features = visual_features(cyclic_cell_shift(base_image, row_cells=1))
+        base_inputs, base_patch_features, base_merger_features = visual_features(base_image)
+        _, right_patch_features, _ = visual_features(cyclic_cell_shift(base_image, col_cells=1))
+        _, down_patch_features, _ = visual_features(cyclic_cell_shift(base_image, row_cells=1))
         patch_rows, patch_cols = base_inputs["image_grid_thw"].detach().cpu().tolist()[0][1:]
         expected_patch_grid = [merged_rows * MERGE_SIZE, merged_cols * MERGE_SIZE]
         geometry_matches_request = [patch_rows, patch_cols] == expected_patch_grid
-        right_match = shifted_feature_match(base_features, right_features, merged_rows, merged_cols, row_shift=0, col_shift=1)
-        down_match = shifted_feature_match(base_features, down_features, merged_rows, merged_cols, row_shift=1, col_shift=0)
+        patches_per_merged_cell = int(base_patch_features.shape[0] // base_merger_features.shape[0])
+        right_match = shifted_feature_match(
+            base_patch_features, right_patch_features, merged_rows, merged_cols,
+            row_shift=0, col_shift=1, units_per_merged_cell=patches_per_merged_cell,
+        )
+        down_match = shifted_feature_match(
+            base_patch_features, down_patch_features, merged_rows, merged_cols,
+            row_shift=1, col_shift=0, units_per_merged_cell=patches_per_merged_cell,
+        )
         empirically_validated = geometry_matches_request and right_match["accuracy"] == 1.0 and down_match["accuracy"] == 1.0
         return {
             "patch_grid": {"rows": patch_rows, "cols": patch_cols},
             "merged_grid": {"rows": merged_rows, "cols": merged_cols},
             "geometry_matches_requested_asymmetric_grid": geometry_matches_request,
             "ordering_rule": "token_index = row * merged_grid_cols + col",
+            "patch_embedding_shape": list(base_patch_features.shape),
+            "merger_output_shape": list(base_merger_features.shape),
+            "patches_per_merged_cell": patches_per_merged_cell,
             "mapping": [
                 {"token": index, "row": index // merged_cols, "col": index % merged_cols}
                 for index in range(merged_rows * merged_cols)
             ],
             "evidence": {
                 "diagnostic_image": "Each 32x32 merged cell has an independent deterministic RGB texture.",
+                "patch_embedding": "The match is measured before the vision forward adds positional embeddings or contextualizes patches.",
                 "horizontal_cyclic_shift": right_match,
                 "vertical_cyclic_shift": down_match,
             },
@@ -456,12 +485,12 @@ def validate_qwen(device: torch.device) -> dict[str, Any]:
             "empirically_validated": empirically_validated,
         }
 
-    # No attention is requested for these six short forwards. All post-merger
-    # tensors are immediately copied to CPU by the existing temporary hook.
+    # No attention is requested for these six short forwards. Patch and merger
+    # tensors are immediately copied to CPU by the existing temporary hooks.
     summary["visual_token_ordering"] = {
         "transformers_version": transformers.__version__,
         "model_revision": getattr(model.config, "_commit_hash", None),
-        "method": "Empirical whole-cell cyclic shifts matched by post-merger feature cosine similarity, plus a direct merger-to-language insertion comparison.",
+        "method": "Empirical whole-cell cyclic shifts matched at patch embedding before positional encoding, plus installed vision/merger source tracing and a direct merger-to-language insertion comparison.",
         "processor_preprocess_source": method_source_summary(processor.image_processor, "preprocess"),
         "vision_forward_source": module_source_summary(visual),
         "merger_forward_source": module_source_summary(visual.merger),
