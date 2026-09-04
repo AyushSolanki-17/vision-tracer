@@ -23,3 +23,6 @@
   cache-only analysis, but model-release verification failed: 8.17 GB remained
   allocated because local variables retained Qwen submodules. Fixed the
   references and added an explicit release-verification result; rerun pending.
+- 2026-09-05: Added evidence matrix, forward-compatible cache contract, and
+  measured-shape storage/GPU budget specification. No dataset, model, or large
+  extraction work was started.
