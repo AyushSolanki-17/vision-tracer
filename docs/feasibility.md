@@ -111,9 +111,33 @@ Still-image visual-token count is `(H'/32)*(W'/32)` or
 vision start/end are delimiters, not spatial features. There is no CLS token in
 this visual-to-language sequence. Sources: [preprocessor](https://huggingface.co/Qwen/Qwen3-VL-4B-Instruct/blob/main/preprocessor_config.json), [processor implementation](https://github.com/huggingface/transformers/blob/main/src/transformers/models/qwen2_vl/image_processing_qwen2_vl.py).
 
-**Requires Kaggle validation:** log `image_grid_thw`, image-mask count, merger
-length, and index→(row,column) order with two asymmetric image sizes. Set a
-conservative `max_pixels`; the configured maximum is not a safe T4 budget.
+**Kaggle validated (Transformers 4.57.6; Qwen revision
+`ebb281ec70b05090aa6165b016eac8ec08e71b17`; repository commit
+`49cf89fcb9a29d1ca5145f864a22cc646fb63ebc`):** the visual-token ordering is
+row-major over the post-2×2-merge grid:
+
+```text
+token_index = row * merged_grid_cols + col
+```
+
+Evidence is empirical at the patch-embedding boundary, before positional
+encoding and vision-block contextualization. Deterministic, content-unique
+32×32 merged cells were cyclically shifted one cell horizontally and vertically.
+For both asymmetric grids, all 384 patch embeddings matched their expected
+pre-shift content coordinates (384/384 for each shift):
+
+| Patch grid | Merged grid | Horizontal match | Vertical match |
+|---|---|---:|---:|
+| 16×24 | 8×12 | 384/384 | 384/384 |
+| 24×16 | 12×8 | 384/384 | 384/384 |
+
+The observed merger input was `(384,1024)` and merger output `(96,2560)`, i.e.
+four contiguous patch embeddings per merged token. The installed vision forward
+records no subsequent spatial reordering, and the merger output equalled layer
+0's image-placeholder positions exactly (maximum absolute difference 0.0).
+This establishes input token indexing; it does not make an attention or causal
+claim. Keep the conservative `max_pixels`; the configured maximum is not a safe
+T4 budget.
 
 ## Minimum hook strategy
 
