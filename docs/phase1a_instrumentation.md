@@ -93,6 +93,17 @@ example shape, the selected evidence is expected to be only a few megabytes
 per image in FP16; report the measured value after Kaggle execution rather
 than treating that estimate as a result.
 
+The initial Kaggle run wrote all four caches and completed CPU analysis, with
+3.15 seconds for the first 256x384 extraction and 0.11--0.13 seconds for
+subsequent warmed forwards. 256x384 caches were 9,643,509 bytes and 256x256
+caches were 6,243,257 bytes. Peak allocated VRAM was 9,030,223,360 bytes and
+peak reserved VRAM was 9,110,028,288 bytes. This first run is not a successful
+completion of the release requirement: it reported 8,166,265,344 allocated
+bytes after release. The cause was retained Python references to vision/text
+submodules; the extractor now deletes those references and reports an explicit
+`model_release_verified` status. Rerun before treating this validation as
+complete.
+
 ## CPU reload and analysis
 
 After extraction returns, the script reloads every cache with

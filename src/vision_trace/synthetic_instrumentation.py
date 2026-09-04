@@ -220,19 +220,23 @@ def run_synthetic_instrumentation(
                 "representation_shapes": record["tensor_descriptors"]["representations"],
                 "attention_shapes": record["tensor_descriptors"]["attentions"],
             })
-            del outputs, inputs, selected_attentions, record
+            del outputs, inputs, raw_selected_attentions, selected_attentions, record
     finally:
         hooks.close()
         # Explicit release is part of this instrumentation contract.
-        del model, processor
+        # These are submodule references and must be released with the parent
+        # model; otherwise the 4B parameters remain allocated on CUDA.
+        del visual, language_layers, model, processor
         gc.collect()
         torch.cuda.empty_cache()
 
+    post_release_memory = _cuda_memory()
     return {
         "experiment_identifier": "synthetic_instrumentation",
         "model_loading_seconds": load_seconds,
         "cache_paths": cache_paths,
         "images": image_reports,
-        "post_release_memory": _cuda_memory(),
+        "post_release_memory": post_release_memory,
+        "model_release_verified": post_release_memory["allocated_bytes"] < 1_000_000_000,
         "environment": {"python": platform.python_version(), "torch_version": torch.__version__},
     }

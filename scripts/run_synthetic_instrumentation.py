@@ -30,6 +30,9 @@ def main() -> int:
     report_path = args.output_dir / "run_report.json"
     report_path.write_text(json.dumps(report, indent=2) + "\n")
     print(json.dumps(report, indent=2))
+    if not report["model_release_verified"]:
+        print("FAILURE: Qwen CUDA allocation remained above the release threshold.")
+        return 1
     return 0
 
 
