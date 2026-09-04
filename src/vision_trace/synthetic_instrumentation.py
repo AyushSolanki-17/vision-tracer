@@ -130,9 +130,13 @@ def run_synthetic_instrumentation(
     output = Path(output_directory)
     output.mkdir(parents=True, exist_ok=True)
     device = torch.device("cuda:0")
+    # Kaggle's PyTorch build rejects torch.device as the optional argument to
+    # reset_peak_memory_stats. Make device 0 current and use the portable
+    # no-argument form for all per-device memory calls below.
+    torch.cuda.set_device(device)
     processor = AutoProcessor.from_pretrained(QWEN_MODEL_ID, revision=QWEN_MODEL_REVISION)
     torch.cuda.empty_cache()
-    torch.cuda.reset_peak_memory_stats(device)
+    torch.cuda.reset_peak_memory_stats()
     load_started = time.perf_counter()
     model = Qwen3VLForConditionalGeneration.from_pretrained(
         QWEN_MODEL_ID, revision=QWEN_MODEL_REVISION, torch_dtype=torch.float16, attn_implementation="eager"
@@ -157,7 +161,7 @@ def run_synthetic_instrumentation(
             hooks.tensors.clear()
             image = render_synthetic_image(spec)
             inputs = _qwen_inputs(processor, image, device)
-            torch.cuda.reset_peak_memory_stats(device)
+            torch.cuda.reset_peak_memory_stats()
             started = time.perf_counter()
             with torch.inference_mode():
                 # Eager materializes all layers transiently in the model API;

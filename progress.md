@@ -16,3 +16,6 @@
 - 2026-09-05: CPU test suite passed (4 tests), as did source compilation and
   whitespace validation. Kaggle GPU instrumentation is ready but deliberately
   has not been run from the local machine.
+- 2026-09-05: Kaggle validation exposed a PyTorch API compatibility error in
+  peak-memory reset before model loading. Updated the extractor to select CUDA
+  device 0 and use the portable no-argument reset call; rerun is pending.
