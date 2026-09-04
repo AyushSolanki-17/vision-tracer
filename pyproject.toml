@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vision-trace"
+version = "0.1.0"
+description = "Reproducible instrumentation for tracing visual information in multimodal models."
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+  "numpy>=1.26",
+  "Pillow>=10",
+  "torch>=2.4",
+]
+
+[project.optional-dependencies]
+qwen = [
+  "transformers>=4.57,<5",
+  "accelerate>=1.0",
+  "huggingface_hub>=0.26",
+  "safetensors>=0.4",
+]
+dev = ["pytest>=8"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.setuptools.packages.find]
+where = ["src"]
