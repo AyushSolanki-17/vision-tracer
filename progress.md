@@ -26,3 +26,6 @@
 - 2026-09-05: Added evidence matrix, forward-compatible cache contract, and
   measured-shape storage/GPU budget specification. No dataset, model, or large
   extraction work was started.
+- 2026-09-05: Completed CPU-only pilot readiness audit. Documented concrete
+  synthetic-only, missing hybrid-capture, DINO, and provenance blockers; no GPU
+  run is authorized until a narrowly scoped implementation task resolves them.

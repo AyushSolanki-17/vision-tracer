@@ -34,6 +34,15 @@ def test_image_token_indices_match_merged_grid() -> None:
     assert geometry.token_coordinates_thw[-1] == (0, 7, 11)
 
 
+def test_image_token_geometry_supports_distinct_single_image_grids() -> None:
+    for patch_rows, patch_cols in ((24, 16), (20, 12)):
+        token_count = (patch_rows // 2) * (patch_cols // 2)
+        geometry = build_image_token_geometry([[1, patch_rows, patch_cols]], range(7, 7 + token_count))
+        assert geometry.merged_grid_thw == (1, patch_rows // 2, patch_cols // 2)
+        assert geometry.image_token_sequence_indices[0] == 7
+        assert geometry.token_coordinates_thw[-1] == (0, patch_rows // 2 - 1, patch_cols // 2 - 1)
+
+
 def test_capture_shape_validation_accepts_observed_qwen_layout() -> None:
     patch_count, merged_count, sequence_length = 384, 96, 114
     captures = {"visual.patch_embed": torch.zeros((patch_count, 1024), dtype=torch.float16)}
