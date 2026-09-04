@@ -29,3 +29,6 @@
 - 2026-09-05: Completed CPU-only pilot readiness audit. Documented concrete
   synthetic-only, missing hybrid-capture, DINO, and provenance blockers; no GPU
   run is authorized until a narrowly scoped implementation task resolves them.
+- 2026-09-05: Implemented the narrow manifest-driven real-image pilot path,
+  schema-2 cache/integrity support, hybrid Qwen capture configuration, DINO
+  extraction, and CPU-only validation tests. Kaggle execution remains pending.

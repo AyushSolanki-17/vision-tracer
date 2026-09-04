@@ -18,6 +18,7 @@ class ImageTokenGeometry:
     image_grid_thw: tuple[int, int, int]
     merged_grid_thw: tuple[int, int, int]
     image_token_sequence_indices: tuple[int, ...]
+    patch_token_coordinates_thw: tuple[tuple[int, int, int], ...]
     token_coordinates_thw: tuple[tuple[int, int, int], ...]
 
     def metadata(self) -> dict[str, object]:
@@ -51,4 +52,10 @@ def build_image_token_geometry(
         for row in range(merged[1])
         for col in range(merged[2])
     )
-    return ImageTokenGeometry((temporal, patch_rows, patch_cols), merged, indices, coordinates)
+    patch_coordinates = tuple(
+        (time, row, col)
+        for time in range(temporal)
+        for row in range(patch_rows)
+        for col in range(patch_cols)
+    )
+    return ImageTokenGeometry((temporal, patch_rows, patch_cols), merged, indices, patch_coordinates, coordinates)
