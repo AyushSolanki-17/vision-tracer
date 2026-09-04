@@ -40,6 +40,25 @@ From the repository root in the Kaggle terminal or a notebook shell cell:
 python scripts/kaggle_smoke_test.py
 ```
 
+To rerun only the final Qwen visual-token-ordering check (and retain the DINO
+summary already obtained), run:
+
+```bash
+python scripts/kaggle_smoke_test.py --qwen-only
+```
+
+`VISION_TRACE_GIT_COMMIT` is only needed when the Kaggle working directory was
+uploaded without its `.git` metadata. Before running an uploaded copy, set it
+to the exact commit that was uploaded, for example:
+
+```bash
+export VISION_TRACE_GIT_COMMIT="<exact uploaded commit SHA>"
+python scripts/kaggle_smoke_test.py --qwen-only
+```
+
+A normal clone records its commit automatically. Do not replace this with a
+guessed revision.
+
 The script makes two deterministic asymmetric synthetic RGB images locally;
 no image or dataset is downloaded. It writes only these small, run-specific
 files:
@@ -64,10 +83,16 @@ The structured console report and JSON summaries should show:
   0/3/18/35, and final language hidden state.
 - An eager attention result with non-`None` entries, layer count, and one
   `(B, H, S, S)` shape.
-- Two asymmetric image geometry reports and the installed merger forward-source
-  excerpt. The JSON includes a candidate index-to-row/column mapping. Declare
-  it row-major only after the retained implementation excerpt matches that
-  flattening operation.
+- A visual-token-ordering report for both `16×24 → 8×12` and `24×16 → 12×8`
+  grids. It records installed processor/vision/merger source excerpts,
+  patch-embed and merger-input hook shapes, and the direct comparison between
+  merger output and language layer-0 image positions.
+- Empirical cyclic-shift evidence: every merged `32×32` cell has a unique
+  deterministic texture. One-cell horizontal and vertical cyclic shifts are
+  matched against CPU-detached post-merger features. Treat the ordering as
+  established only when both shift checks report 100% expected matches and
+  `empirically_validated: true`; otherwise the report is explicitly
+  `inconclusive` and Phase 0B must not be closed.
 - DeepStack source/boundary evidence: deltas between a decoder layer output and
   the next decoder layer input at visual positions. This establishes whether
   the parent loop adds DeepStack features in between; layer 3 input should be
@@ -97,3 +122,7 @@ to SDPA inside this test: record its peak memory and sequence length, then
 escalate the smallest decision (lower pixel budget versus a different GPU
 configuration). Likewise, missing attention tensors or a visual-token count
 mismatch requires inspection before later phases begin.
+
+If the ordering check is conclusive, its exact rule is reported as
+`token_index = row * merged_grid_cols + col`, where `(row, col)` indexes the
+post-2×2-merge grid. This is a runtime conclusion, not a pre-run assumption.

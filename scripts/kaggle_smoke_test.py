@@ -8,8 +8,10 @@ small JSON summaries under results/smoke_test/.
 
 from __future__ import annotations
 
+import argparse
 import inspect
 import json
+import os
 import platform
 import subprocess
 import sys
@@ -31,6 +33,9 @@ RESULTS_DIR = Path("results/smoke_test")
 # Far below the model's configured maximum.  The asymmetric inputs have at
 # least the processor minimum pixel count and are used only for geometry.
 MAX_PIXELS = 262_144
+MERGE_SIZE = 2
+PATCH_SIZE = 16
+MERGED_CELL_PIXELS = PATCH_SIZE * MERGE_SIZE
 
 
 def jsonable(value: Any) -> Any:
@@ -56,7 +61,9 @@ def git_commit() -> str | None:
             ["git", "rev-parse", "HEAD"], text=True, stderr=subprocess.DEVNULL
         ).strip()
     except Exception:
-        return None
+        # An uploaded Kaggle directory may not retain .git. The caller can
+        # supply the exact source commit without embedding a stale hash here.
+        return os.environ.get("VISION_TRACE_GIT_COMMIT")
 
 
 def environment_report() -> dict[str, Any]:
@@ -150,22 +157,29 @@ class TemporaryHooks:
         return removed
 
 
-def make_asymmetric_image(height: int, width: int) -> Image.Image:
-    """Make a deterministic spatially labelled RGB image without downloading data."""
-    y, x = np.indices((height, width))
-    # Unequal gradients plus four differently colored corners make orientation
-    # visible if this image is displayed while investigating a failed mapping.
-    pixels = np.stack(
-        [((x * 251) // max(width - 1, 1)).astype(np.uint8),
-         ((y * 241) // max(height - 1, 1)).astype(np.uint8),
-         (((3 * x + 5 * y) * 239 // max(3 * width + 5 * height - 8, 1))).astype(np.uint8)],
-        axis=-1,
+def make_spatial_diagnostic_image(merged_rows: int, merged_cols: int) -> Image.Image:
+    """Return a deterministic, spatially unique image aligned to 2x2 patch cells.
+
+    Each 32x32 cell has an independent RGB texture.  A cyclic 32-pixel shift
+    therefore moves whole merged cells without changing their contents.
+    """
+    generator = np.random.default_rng(7_310_941)
+    pixels = generator.integers(
+        0, 256,
+        size=(merged_rows * MERGED_CELL_PIXELS, merged_cols * MERGED_CELL_PIXELS, 3),
+        dtype=np.uint8,
     )
-    pixels[:16, :16] = (255, 0, 0)
-    pixels[:16, -16:] = (0, 255, 0)
-    pixels[-16:, :16] = (0, 0, 255)
-    pixels[-16:, -16:] = (255, 255, 0)
     return Image.fromarray(pixels)
+
+
+def cyclic_cell_shift(image: Image.Image, *, row_cells: int = 0, col_cells: int = 0) -> Image.Image:
+    pixels = np.asarray(image)
+    shifted = np.roll(
+        pixels,
+        shift=(row_cells * MERGED_CELL_PIXELS, col_cells * MERGED_CELL_PIXELS),
+        axis=(0, 1),
+    )
+    return Image.fromarray(shifted)
 
 
 def qwen_inputs(processor, image: Image.Image, device: torch.device) -> dict[str, torch.Tensor]:
@@ -206,6 +220,24 @@ def module_source_summary(module: torch.nn.Module) -> dict[str, Any]:
         return {"class": type(module).__name__, "source_available": False}
 
 
+def method_source_summary(instance: Any, method_name: str) -> dict[str, Any]:
+    """Record the installed processor code relevant to the runtime result."""
+    try:
+        source = inspect.getsource(getattr(type(instance), method_name))
+        return {
+            "class": type(instance).__name__,
+            "method": method_name,
+            "source_available": True,
+            "relevant_lines": [
+                line.strip() for line in source.splitlines()
+                if any(term in line.lower() for term in ("reshape", "view(", "permute", "transpose", "flatten", "merge"))
+            ][:80],
+            "source_excerpt": source[:4000],
+        }
+    except (AttributeError, OSError, TypeError):
+        return {"class": type(instance).__name__, "method": method_name, "source_available": False}
+
+
 def geometry_report(inputs: dict[str, torch.Tensor], model, merger_capture: torch.Tensor) -> dict[str, Any]:
     grid = inputs["image_grid_thw"].detach().cpu().tolist()
     mask_count = int((inputs["input_ids"] == model.config.image_token_id).sum().item())
@@ -213,7 +245,7 @@ def geometry_report(inputs: dict[str, torch.Tensor], model, merger_capture: torc
     # candidate coordinates; the runtime source and counts below are retained
     # so a row-major conclusion is evidence-backed rather than assumed.
     t, patch_rows, patch_cols = grid[0]
-    rows, cols = patch_rows // 2, patch_cols // 2
+    rows, cols = patch_rows // MERGE_SIZE, patch_cols // MERGE_SIZE
     mapping = [
         {"token": index, "row": index // cols, "col": index % cols}
         for index in range(rows * cols * t)
@@ -224,8 +256,41 @@ def geometry_report(inputs: dict[str, torch.Tensor], model, merger_capture: torc
         "multimodal_sequence_length": int(inputs["input_ids"].shape[1]),
         "merger_output_length": int(merger_capture.shape[0]),
         "expected_merged_tokens": int(t * rows * cols),
-        "candidate_row_major_mapping": mapping,
+        "row_major_mapping": mapping,
         "count_agreement": mask_count == int(merger_capture.shape[0]) == int(t * rows * cols),
+    }
+
+
+def shifted_feature_match(
+    base_features: torch.Tensor,
+    shifted_features: torch.Tensor,
+    merged_rows: int,
+    merged_cols: int,
+    *,
+    row_shift: int,
+    col_shift: int,
+) -> dict[str, Any]:
+    """Match each shifted feature to its original cell by cosine similarity."""
+    base = torch.nn.functional.normalize(base_features.float(), dim=-1)
+    shifted = torch.nn.functional.normalize(shifted_features.float(), dim=-1)
+    matched_indices = (shifted @ base.T).argmax(dim=1).tolist()
+    expected_indices = [
+        ((row - row_shift) % merged_rows) * merged_cols + ((col - col_shift) % merged_cols)
+        for row in range(merged_rows)
+        for col in range(merged_cols)
+    ]
+    matches = [actual == expected for actual, expected in zip(matched_indices, expected_indices)]
+    mismatches = [
+        {"shifted_token": index, "expected_base_token": expected_indices[index], "matched_base_token": matched_indices[index]}
+        for index, matched in enumerate(matches) if not matched
+    ][:12]
+    return {
+        "shift_cells": {"row": row_shift, "col": col_shift},
+        "matching_method": "argmax cosine similarity between CPU-detached post-merger visual features",
+        "matched_tokens": int(sum(matches)),
+        "total_tokens": len(matches),
+        "accuracy": float(sum(matches) / len(matches)),
+        "mismatch_examples": mismatches,
     }
 
 
@@ -242,12 +307,14 @@ def validate_qwen(device: torch.device) -> dict[str, Any]:
         "visual": type(model.model.visual).__name__,
         "merger": type(model.model.visual.merger).__name__,
         "language_layer_count": len(model.model.language_model.layers),
+        "model_revision": getattr(model.config, "_commit_hash", None),
     }
 
     hooks = TemporaryHooks()
     visual = model.model.visual
     layers = model.model.language_model.layers
     for name, module in {
+        "visual.patch_embed": visual.patch_embed,
         "visual.blocks.0": visual.blocks[0],
         "visual.merger": visual.merger,
         "language_model.layers.0": layers[0],
@@ -261,10 +328,13 @@ def validate_qwen(device: torch.device) -> dict[str, Any]:
     }.items():
         hooks.forward(name, module)
     # These additional pre-hooks establish the DeepStack parent-loop boundary.
-    for index in (1, 2, 3):
+    hooks.pre_forward("visual.merger.input", visual.merger)
+    for index in (0, 1, 2, 3):
         hooks.pre_forward(f"language_model.layers.{index}.input", layers[index])
 
-    primary_image = make_asymmetric_image(256, 384)
+    # This is an 8x12 merged grid / 16x24 patch grid. It remains the image for
+    # all existing attention, hook, and DeepStack checks.
+    primary_image = make_spatial_diagnostic_image(8, 12)
     inputs = qwen_inputs(processor, primary_image, device)
     summary["processor"] = {
         "output_keys": sorted(inputs),
@@ -293,6 +363,17 @@ def validate_qwen(device: torch.device) -> dict[str, Any]:
     summary["hook_capture_detached_cpu"] = all(
         value.device.type == "cpu" and not value.requires_grad for value in hooks.captures.values()
     )
+
+    layer0_input = hooks.captures["language_model.layers.0.input"]
+    inserted_features = layer0_input[0, (inputs["input_ids"] == model.config.image_token_id).detach().cpu()[0]]
+    insertion_delta = float((inserted_features - merger_capture).abs().max())
+    summary["visual_language_insertion"] = {
+        "method": "Compare merger output to layer-0 forward-pre input at image-placeholder positions.",
+        "merger_shape": list(merger_capture.shape),
+        "image_position_shape": list(inserted_features.shape),
+        "max_abs_difference": insertion_delta,
+        "same_order_within_fp16_tolerance": insertion_delta <= 1e-3,
+    }
 
     attentions = outputs.attentions
     representative = next((item for item in attentions if item is not None), None)
@@ -340,17 +421,54 @@ def validate_qwen(device: torch.device) -> dict[str, Any]:
         "interpretation": "A non-zero visual delta from decoder output N to layer N+1 input demonstrates a parent-level addition between those hooks. Layer 3 input therefore follows all three early additions.",
     }
 
-    # A second shape is intentionally run without attention output to keep the
-    # eager quadratic allocation confined to exactly one inspection forward.
-    second_inputs = qwen_inputs(processor, make_asymmetric_image(384, 256), device)
-    with torch.inference_mode():
-        model(**second_inputs, output_attentions=False, output_hidden_states=False, return_dict=True)
-    second_merger = hooks.captures["visual.merger"]
+    def visual_features(diagnostic_image: Image.Image) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
+        diagnostic_inputs = qwen_inputs(processor, diagnostic_image, device)
+        with torch.inference_mode():
+            model(**diagnostic_inputs, output_attentions=False, output_hidden_states=False, return_dict=True)
+        return diagnostic_inputs, hooks.captures["visual.merger"].clone()
+
+    def ordering_validation(merged_rows: int, merged_cols: int) -> dict[str, Any]:
+        base_image = make_spatial_diagnostic_image(merged_rows, merged_cols)
+        base_inputs, base_features = visual_features(base_image)
+        right_inputs, right_features = visual_features(cyclic_cell_shift(base_image, col_cells=1))
+        down_inputs, down_features = visual_features(cyclic_cell_shift(base_image, row_cells=1))
+        patch_rows, patch_cols = base_inputs["image_grid_thw"].detach().cpu().tolist()[0][1:]
+        expected_patch_grid = [merged_rows * MERGE_SIZE, merged_cols * MERGE_SIZE]
+        geometry_matches_request = [patch_rows, patch_cols] == expected_patch_grid
+        right_match = shifted_feature_match(base_features, right_features, merged_rows, merged_cols, row_shift=0, col_shift=1)
+        down_match = shifted_feature_match(base_features, down_features, merged_rows, merged_cols, row_shift=1, col_shift=0)
+        empirically_validated = geometry_matches_request and right_match["accuracy"] == 1.0 and down_match["accuracy"] == 1.0
+        return {
+            "patch_grid": {"rows": patch_rows, "cols": patch_cols},
+            "merged_grid": {"rows": merged_rows, "cols": merged_cols},
+            "geometry_matches_requested_asymmetric_grid": geometry_matches_request,
+            "ordering_rule": "token_index = row * merged_grid_cols + col",
+            "mapping": [
+                {"token": index, "row": index // merged_cols, "col": index % merged_cols}
+                for index in range(merged_rows * merged_cols)
+            ],
+            "evidence": {
+                "diagnostic_image": "Each 32x32 merged cell has an independent deterministic RGB texture.",
+                "horizontal_cyclic_shift": right_match,
+                "vertical_cyclic_shift": down_match,
+            },
+            "validation_level": "empirical" if empirically_validated else "inconclusive",
+            "empirically_validated": empirically_validated,
+        }
+
+    # No attention is requested for these six short forwards. All post-merger
+    # tensors are immediately copied to CPU by the existing temporary hook.
     summary["visual_token_ordering"] = {
-        "method": "Two asymmetric synthetic images; processor grid/mask/merger counts plus the installed merger forward source are recorded. Confirm the candidate mapping only if its source shows the corresponding flatten order.",
+        "transformers_version": transformers.__version__,
+        "model_revision": getattr(model.config, "_commit_hash", None),
+        "method": "Empirical whole-cell cyclic shifts matched by post-merger feature cosine similarity, plus a direct merger-to-language insertion comparison.",
+        "processor_preprocess_source": method_source_summary(processor.image_processor, "preprocess"),
+        "vision_forward_source": module_source_summary(visual),
         "merger_forward_source": module_source_summary(visual.merger),
-        "first_asymmetric_image": geometry_report(inputs, model, merger_capture),
-        "second_asymmetric_image": geometry_report(second_inputs, model, second_merger),
+        "merger_input_capture": tensor_info(hooks.captures["visual.merger.input"]),
+        "first_asymmetric_image": ordering_validation(8, 12),
+        "second_asymmetric_image": ordering_validation(12, 8),
+        "language_insertion": summary["visual_language_insertion"],
     }
     summary["hooks_removed"] = hooks.remove()
     summary["status"] = "passed"
@@ -389,6 +507,13 @@ def validate_dino(device: torch.device) -> dict[str, Any]:
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--qwen-only",
+        action="store_true",
+        help="Run the narrow Qwen instrumentation/ordering validation and skip DINO.",
+    )
+    args = parser.parse_args()
     if not torch.cuda.is_available():
         print("FAILURE: This smoke test requires a Kaggle CUDA GPU runtime.", file=sys.stderr)
         return 2
@@ -408,6 +533,8 @@ def main() -> int:
     import gc
     gc.collect()
     torch.cuda.empty_cache()
+    if args.qwen_only:
+        return 0
     try:
         dino = validate_dino(device)
         write_summary("dino_summary.json", dino)
