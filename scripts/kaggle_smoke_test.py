@@ -165,7 +165,7 @@ def make_asymmetric_image(height: int, width: int) -> Image.Image:
     pixels[:16, -16:] = (0, 255, 0)
     pixels[-16:, :16] = (0, 0, 255)
     pixels[-16:, -16:] = (255, 255, 0)
-    return Image.fromarray(pixels, mode="RGB")
+    return Image.fromarray(pixels)
 
 
 def qwen_inputs(processor, image: Image.Image, device: torch.device) -> dict[str, torch.Tensor]:
@@ -251,6 +251,10 @@ def validate_qwen(device: torch.device) -> dict[str, Any]:
         "visual.blocks.0": visual.blocks[0],
         "visual.merger": visual.merger,
         "language_model.layers.0": layers[0],
+        # These two extra temporary captures are needed only to compare each
+        # early decoder output with the next block input across DeepStack.
+        "language_model.layers.1": layers[1],
+        "language_model.layers.2": layers[2],
         "language_model.layers.3": layers[3],
         "language_model.layers.18": layers[18],
         "language_model.layers.35": layers[35],
