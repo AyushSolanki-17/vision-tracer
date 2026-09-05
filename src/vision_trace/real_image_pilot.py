@@ -10,6 +10,7 @@ import platform
 import subprocess
 import time
 from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -82,6 +83,19 @@ def _json_hash(value: Any) -> str:
     return _sha256_text(json.dumps(value, sort_keys=True, default=str, separators=(",", ":")))
 
 
+def _json_primitive(value: Any) -> Any:
+    """Convert processor metadata to values safe for PyTorch's safe loader."""
+    if isinstance(value, Enum):
+        return f"{type(value).__module__}.{type(value).__qualname__}.{value.name}"
+    if isinstance(value, dict):
+        return {str(key): _json_primitive(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_primitive(item) for item in value]
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    return str(value)
+
+
 def _git_commit(root: Path) -> str | None:
     try:
         return subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True, stderr=subprocess.DEVNULL).strip()
@@ -100,7 +114,7 @@ def _cuda_memory() -> dict[str, int]:
 
 def _processor_metadata(processor: Any, *, identifier: str, revision: str) -> dict[str, Any]:
     image_processor = getattr(processor, "image_processor", processor)
-    config = image_processor.to_dict() if hasattr(image_processor, "to_dict") else {}
+    config = _json_primitive(image_processor.to_dict()) if hasattr(image_processor, "to_dict") else {}
     return {"identifier": identifier, "revision": revision, "config": config, "config_sha256": _json_hash(config)}
 
 

@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import torch
+from PIL.Image import Resampling
 
 
 LEGACY_CACHE_SCHEMA_VERSION = 1
@@ -198,12 +199,13 @@ def save_cache(path: str | Path, record: dict[str, Any]) -> Path:
 def load_cache_cpu(path: str | Path) -> dict[str, Any]:
     """Load evidence without importing Transformers or any Qwen class."""
     # PyTorch 2.6 made safe ``weights_only`` loading the default. Earlier pilot
-    # records can contain PyTorch's harmless ``TorchVersion`` wrapper in runtime
-    # provenance; allow only that concrete value type, never arbitrary pickle
-    # globals. New records stringify version fields below their call sites.
+    # records can contain PyTorch's harmless ``TorchVersion`` wrapper and a
+    # Pillow resampling enum in processor provenance. Allow only these concrete
+    # metadata value types, never arbitrary pickle globals. New records serialize
+    # both forms to primitives below their call sites.
     from torch.torch_version import TorchVersion
 
-    with torch.serialization.safe_globals([TorchVersion]):
+    with torch.serialization.safe_globals([TorchVersion, Resampling]):
         record = torch.load(Path(path), map_location="cpu", weights_only=True)
     validate_cache_record(record)
     return record

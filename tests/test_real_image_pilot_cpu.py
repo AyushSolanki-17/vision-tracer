@@ -20,6 +20,7 @@ from vision_trace.cache import (
 )
 from vision_trace.geometry import build_image_token_geometry
 from vision_trace.manifest import load_image_manifest, sha256_file, verified_image
+from vision_trace.real_image_pilot import _processor_metadata
 
 
 def _schema2_record() -> dict:
@@ -76,10 +77,20 @@ def test_schema2_round_trip_integrity_and_cpu_analysis(tmp_path) -> None:
 def test_cpu_cache_loader_handles_legacy_torch_version_provenance(tmp_path) -> None:
     record = _schema2_record()
     record["provenance"]["environment"] = {"torch": TorchVersion("2.6.0")}
+    record["provenance"]["processor"]["dino"]["config"] = {"resample": Image.Resampling.BICUBIC}
     cache_path = save_cache(tmp_path / "legacy-torch-version.pt", record)
     from vision_trace.cache import load_cache_cpu
 
     assert load_cache_cpu(cache_path)["provenance"]["environment"]["torch"] == "2.6.0"
+
+
+def test_processor_metadata_serializes_pillow_enums_to_primitives() -> None:
+    class Processor:
+        def to_dict(self):
+            return {"resample": Image.Resampling.BICUBIC, "nested": (Image.Resampling.NEAREST,)}
+
+    metadata = _processor_metadata(Processor(), identifier="test", revision="revision")
+    assert metadata["config"] == {"resample": "PIL.Image.Resampling.BICUBIC", "nested": ["PIL.Image.Resampling.NEAREST"]}
 
 
 def test_schema2_rejects_missing_spatial_metadata() -> None:
