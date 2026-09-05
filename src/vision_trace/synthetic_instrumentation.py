@@ -238,5 +238,5 @@ def run_synthetic_instrumentation(
         "images": image_reports,
         "post_release_memory": post_release_memory,
         "model_release_verified": post_release_memory["allocated_bytes"] < 1_000_000_000,
-        "environment": {"python": platform.python_version(), "torch_version": torch.__version__},
+        "environment": {"python": platform.python_version(), "torch_version": str(torch.__version__)},
     }

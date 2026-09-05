@@ -197,6 +197,13 @@ def save_cache(path: str | Path, record: dict[str, Any]) -> Path:
 
 def load_cache_cpu(path: str | Path) -> dict[str, Any]:
     """Load evidence without importing Transformers or any Qwen class."""
-    record = torch.load(Path(path), map_location="cpu", weights_only=True)
+    # PyTorch 2.6 made safe ``weights_only`` loading the default. Earlier pilot
+    # records can contain PyTorch's harmless ``TorchVersion`` wrapper in runtime
+    # provenance; allow only that concrete value type, never arbitrary pickle
+    # globals. New records stringify version fields below their call sites.
+    from torch.torch_version import TorchVersion
+
+    with torch.serialization.safe_globals([TorchVersion]):
+        record = torch.load(Path(path), map_location="cpu", weights_only=True)
     validate_cache_record(record)
     return record

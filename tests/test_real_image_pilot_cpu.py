@@ -6,6 +6,7 @@ import hashlib
 import pytest
 import torch
 from PIL import Image
+from torch.torch_version import TorchVersion
 
 from vision_trace.analysis import cached_evidence_analysis
 from vision_trace.cache import (
@@ -70,6 +71,15 @@ def test_schema2_round_trip_integrity_and_cpu_analysis(tmp_path) -> None:
     assert integrity["records"][0]["image_id"] == "image-1"
     analysis = cached_evidence_analysis(record)
     assert analysis["attention_mass_over_image_keys"]["qwen.attention.0"] == pytest.approx(2 / 3, abs=1e-3)
+
+
+def test_cpu_cache_loader_handles_legacy_torch_version_provenance(tmp_path) -> None:
+    record = _schema2_record()
+    record["provenance"]["environment"] = {"torch": TorchVersion("2.6.0")}
+    cache_path = save_cache(tmp_path / "legacy-torch-version.pt", record)
+    from vision_trace.cache import load_cache_cpu
+
+    assert load_cache_cpu(cache_path)["provenance"]["environment"]["torch"] == "2.6.0"
 
 
 def test_schema2_rejects_missing_spatial_metadata() -> None:

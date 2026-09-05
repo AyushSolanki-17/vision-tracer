@@ -191,8 +191,8 @@ def _qwen_descriptors(captures: dict[str, torch.Tensor], attentions: dict[str, t
 
 def _environment(transformers: Any) -> dict[str, Any]:
     return {
-        "python": platform.python_version(), "torch": torch.__version__, "transformers": transformers.__version__,
-        "cuda": torch.version.cuda, "gpu_name": torch.cuda.get_device_name(0),
+        "python": platform.python_version(), "torch": str(torch.__version__), "transformers": str(transformers.__version__),
+        "cuda": str(torch.version.cuda), "gpu_name": torch.cuda.get_device_name(0),
     }
 
 
