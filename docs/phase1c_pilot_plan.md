@@ -8,6 +8,37 @@ batch-one pilot path. This is not a dataset pipeline or production extractor.
 The pilot uses schema 2. Schema-1 synthetic caches remain immutable and are
 read through the existing compatibility path.
 
+## CUB pilot source and manifest preparation
+
+The Phase 1C pilot uses CUB-200-2011 only as a small real-photograph source;
+it does not implement the production CUB experiment. The source is the
+official CaltechDATA release, [CUB-200-2011 version 1.0](https://data.caltech.edu/records/65de6-vp158)
+(DOI `10.22002/D1.20098`). The publisher lists the `CUB_200_2011.tgz` archive
+as 1.2 GB with MD5 `97eceeb196236b17998738112f37df78`, and restricts image use
+to non-commercial research and educational purposes. Review those terms before
+using it.
+
+No images need to be prepared or downloaded on the local development machine.
+In Kaggle, the preparation command either accesses an already-attached official
+CUB archive/directory or, with Internet enabled, downloads the verified
+official archive to ephemeral working storage. In the download mode it verifies
+the publisher's MD5, extracts only `images.txt`, `image_class_labels.txt`,
+`classes.txt`, and the selected images, then deletes the archive. It never
+extracts or retains the full image tree.
+
+The default deterministic selection is 16 images. Sort distinct numeric CUB
+class IDs; choose class positions `floor(i * class_count / 16)` for `i=0..15`;
+then select the lowest numeric image ID in each chosen class. There is no random
+sampling and the recorded seed is `null`. This gives one image from each of 16
+distributed categories without asserting a full-dataset balance.
+
+`scripts/prepare_cub_pilot_manifest.py` writes both `pilot_images.jsonl` and
+`pilot_source_provenance.json`. The latter records the source dataset/release
+and location, selection rule, selected CUB image IDs, class IDs/names,
+source-relative paths, byte hashes, and dimensions. The JSONL duplicates this
+per-image provenance as additional fields while retaining the five fields read
+by the existing extractor.
+
 ## Manifest format
 
 Supply an explicit JSONL file; no image discovery occurs. Each source path is
@@ -105,19 +136,43 @@ SHA-256, sample count, timing, and peak memory.
 
 ## One-session procedure
 
-1. Start one Kaggle notebook with Internet, one T4, and an approved 10–20-image
-   pilot manifest. Do not restart between samples or between Qwen and DINO.
-2. Install project/Qwen dependencies without replacing Kaggle Torch; record
-   environment before model loading.
-3. Run local CPU contract validation against the manifest and a mocked record.
-4. Load Qwen once in FP16/eager on `cuda:0`; extract one image at a time with
+1. Start one Kaggle notebook with Internet enabled and one T4. Review the
+   official CUB terms and, for DINO, accept its Hugging Face terms and add an
+   `HF_TOKEN` Kaggle Secret. Do not enable or use a second GPU.
+2. Install the repository and its Qwen dependencies without replacing Kaggle
+   Torch. In a Python cell, load the secret without printing it:
+
+   ```python
+   import os
+   from kaggle_secrets import UserSecretsClient
+
+   os.environ["HF_TOKEN"] = UserSecretsClient().get_secret("HF_TOKEN")
+   ```
+
+   Then prepare the CUB manifest on CPU in the same session:
+
+   ```bash
+   pip install -q -e '.[qwen,dev]'
+   python scripts/prepare_cub_pilot_manifest.py \
+     --download-official --accept-cub-terms --count 16 \
+     --output-dir /kaggle/working/cub_pilot
+   python -m pytest -q tests/test_cub_pilot_cpu.py tests/test_real_image_pilot_cpu.py
+   ```
+
+   The download is the only source acquisition step; it retains only the 16
+   selected photographs and metadata in `/kaggle/working/cub_pilot`. If Kaggle
+   Internet is unavailable, manually attach the official archive as a Kaggle
+   input (not a manually curated image directory) and replace
+   `--download-official` with
+   `--archive /kaggle/input/<official-cub-archive>/CUB_200_2011.tgz`.
+3. Load Qwen once in FP16/eager on `cuda:0`; extract one image at a time with
    the approved hybrid capture list, immediately save each CPU cache, and
    report runtime/peak memory.
-5. Release Qwen; require release verification; then load DINO once and cache
+4. Release Qwen; require release verification; then load DINO once and cache
    native selected patch-token evidence for the same manifest entries.
-6. Write immutable per-sample caches and the run manifest; reload every cache
+5. Write immutable per-sample caches and the run manifest; reload every cache
    using CPU-only code and validate descriptors/geometry.
-7. Emit one final JSON report. Hard-stop on any missing tensor, mapping/count
+6. Emit one final JSON report. Hard-stop on any missing tensor, mapping/count
    mismatch, cache validation failure, unverified release, or unsafe memory.
 
 ## Exact capture configuration
@@ -140,7 +195,7 @@ norm and image-key attention summaries, and writes `run_report.json`.
 
 ## Kaggle command
 
-Use one T4 and a manifest provided as a Kaggle input. The driver resolves the
+Use one T4. The driver resolves the
 requested DINO revision through Hugging Face to an immutable commit before any
 DINO model files are loaded; that commit is used for both processor/model and
 recorded in every cache. Supply a commit directly with `--dino-revision` when
@@ -150,7 +205,7 @@ one has already been selected. Do not restart the session between Qwen and DINO:
 pip install -q -e '.[qwen]'
 VISION_TRACE_GIT_COMMIT=$(git rev-parse HEAD) \
 python scripts/run_real_image_pilot.py \
-  --manifest /kaggle/input/<pilot-images>/pilot_images.jsonl \
+  --manifest /kaggle/working/cub_pilot/pilot_images.jsonl \
   --dino-revision main \
   --run-id real-image-pilot-001 \
   --output-dir results/real_image_pilot
